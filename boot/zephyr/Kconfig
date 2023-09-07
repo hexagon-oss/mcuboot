@@ -524,6 +524,17 @@ config MCUBOOT_INDICATION_LED
 	  bootloader-led0 alias must be set in the device's .dts
 	  definitions for this to work.
 
+config MCUBOOT_LIGHT_GUIDE
+	bool "Sets initial light code in bootloader mode"
+	default n
+	select DMA
+	select SPI
+	select LED_STRIP
+	select WS2812_STRIP
+	help
+	  Symbol activates the led strip drivers and sets an initial
+	  steady light guide code
+
 rsource "Kconfig.serial_recovery"
 
 config BOOT_INTR_VEC_RELOC
