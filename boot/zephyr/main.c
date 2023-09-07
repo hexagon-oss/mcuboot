@@ -20,6 +20,7 @@
 #include <zephyr.h>
 #include <devicetree.h>
 #include <drivers/gpio.h>
+#include <drivers/led_strip.h>
 #include <sys/__assert.h>
 #include <drivers/flash.h>
 #include <drivers/timer/system_timer.h>
@@ -155,6 +156,47 @@ void led_init(void)
 
 }
 #endif
+
+#ifdef CONFIG_MCUBOOT_LIGHT_GUIDE
+
+#define LIGHT_GUIDE_NODE DT_NODELABEL(light_guide)
+
+#if DT_NODE_HAS_STATUS(LIGHT_GUIDE_NODE, okay) && DT_NODE_HAS_PROP(LIGHT_GUIDE_NODE, chain_length)
+#define LIGHT_GUIDE_DEVICE DEVICE_DT_GET(LIGHT_GUIDE_NODE)
+#define LIGHT_GUIDE_LED_NUM DT_PROP(LIGHT_GUIDE_NODE, chain_length)
+#else
+#error "light_guide devicetree nodelabel is not defined"
+#endif
+
+const static struct device* light_guide = LIGHT_GUIDE_DEVICE;
+
+struct led_rgb guide_leds[LIGHT_GUIDE_LED_NUM];
+
+static const struct led_rgb yellow = { .r = 32, .g = 16, .b = 0, };
+
+void guide_init(void)
+{
+  if (!device_is_ready(light_guide)) {
+    BOOT_LOG_ERR("Light guide device is not ready!\n");
+    return;
+  }
+}
+
+void guide_set_color(const struct led_rgb* color)
+{
+    for (int i = 0; i < LIGHT_GUIDE_LED_NUM; i++) 
+    {
+        memcpy(&guide_leds[i], color, sizeof(struct led_rgb));
+    }
+}
+
+void guide_display_start(void)
+{    
+    guide_set_color(&yellow);
+    led_strip_update_rgb(light_guide, guide_leds, LIGHT_GUIDE_LED_NUM);
+}
+
+#endif // CONFIG_MCUBOOT_LIGHT_GUIDE
 
 void os_heap_init(void);
 
@@ -450,6 +492,11 @@ void main(void)
     led_init();
 #endif
 
+#ifdef CONFIG_MCUBOOT_LIGHT_GUIDE
+    // initialize light guide
+    guide_init();
+#endif
+
     os_heap_init();
 
     ZEPHYR_BOOT_LOG_START();
@@ -526,6 +573,10 @@ void main(void)
     rc = boot_console_init();
     int timeout_in_ms = CONFIG_BOOT_SERIAL_WAIT_FOR_DFU_TIMEOUT;
     uint32_t start = k_uptime_get_32();
+#endif
+
+#ifdef CONFIG_MCUBOOT_LIGHT_GUIDE
+    guide_display_start();
 #endif
 
     FIH_CALL(boot_go, fih_rc, &rsp);
