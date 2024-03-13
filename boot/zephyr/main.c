@@ -169,30 +169,96 @@ const static struct device* light_guide = LIGHT_GUIDE_DEVICE;
 struct led_rgb guide_leds[LIGHT_GUIDE_LED_NUM];
 
 static const struct led_rgb yellow = { .r = 32, .g = 16, .b = 0, };
+static const struct led_rgb red    = { .r = 32, .g =  0, .b = 0 };
+static const struct led_rgb black  = { .r =  0, .g =  0, .b = 0, };
 
 void guide_init(void)
 {
   if (!device_is_ready(light_guide)) {
     BOOT_LOG_ERR("Light guide device is not ready!\n");
-    return;
   }
 }
 
-void guide_set_color(const struct led_rgb* color)
+void guide_set_single_color(const struct led_rgb* color)
 {
-    for (int i = 0; i < LIGHT_GUIDE_LED_NUM; i++) 
+    for (int i = 0; i < LIGHT_GUIDE_LED_NUM; i++)
     {
         memcpy(&guide_leds[i], color, sizeof(struct led_rgb));
     }
 }
 
-void guide_display_start(void)
-{    
-    guide_set_color(&yellow);
+void guide_move_color(const struct led_rgb* color)
+{
+    static int i = 0;
+    static bool uprising = true;
+
+    for (int j = 0; j < LIGHT_GUIDE_LED_NUM; j++) {
+        memcpy(&guide_leds[j], &black, sizeof(struct led_rgb));
+        if (j >= (CONFIG_MCUBOOT_LIGHT_GUIDE_SEGMENT_LEN * i) &&
+                j < (CONFIG_MCUBOOT_LIGHT_GUIDE_SEGMENT_LEN * (i + 1))) {
+            memcpy(&guide_leds[j], color, sizeof(struct led_rgb));
+        }
+        else {
+            memcpy(&guide_leds[j], &black, sizeof(struct led_rgb));
+        }
+    }
+
+    if (uprising) {
+        if (++i >= ((LIGHT_GUIDE_LED_NUM / CONFIG_MCUBOOT_LIGHT_GUIDE_SEGMENT_LEN) - 1)) {
+            uprising = false;
+        }
+    }
+    else {
+        if (--i <= 0) {
+            uprising = true;
+        }
+    }
+
     led_strip_update_rgb(light_guide, guide_leds, LIGHT_GUIDE_LED_NUM);
 }
 
+void guide_display_color(const struct led_rgb* color)
+{
+    guide_set_single_color(color);
+    led_strip_update_rgb(light_guide, guide_leds, LIGHT_GUIDE_LED_NUM);
+}
+
+void guide_display_start(void)
+{
+    guide_display_color(&yellow);
+}
+
+void guide_display_error(void)
+{
+    guide_display_color(&red);
+}
+
 #endif // CONFIG_MCUBOOT_LIGHT_GUIDE
+
+#if defined(CONFIG_MCUBOOT_LIGHT_GUIDE_THREAD)
+#define LIGHT_GUIDE_THREAD_SLEEP_TIME 5 /* [ms] */
+
+/* log are processing in custom routine */
+K_THREAD_STACK_DEFINE(light_guide_stack, CONFIG_MCUBOOT_LIGHT_GUIDE_THREAD_STACK_SIZE);
+struct k_thread light_guide_thread;
+volatile bool stop_light_guide = false;
+K_SEM_DEFINE(light_guide_sem, 1, 1);
+
+/* guide thread needs to be initalized by the application */
+#define LIGHT_GUIDE_START() light_guide_start()
+#define LIGHT_GUIDE_STOP() light_guide_stop(); k_sleep(K_MSEC(10))
+#define LIGHT_GUIDE_ERROR() guide_display_error()
+#elif defined(CONFIG_MCUBOOT_LIGHT_GUIDE)
+/* guide WITHOUT thread needs to be partly initalized by the application */
+#define LIGHT_GUIDE_START() guide_display_start()
+#define LIGHT_GUIDE_STOP() do { } while (false)
+#define LIGHT_GUIDE_ERROR() do { } while (false)
+#else
+/* otherwise, it doesn't need to be initalized by the application */
+#define LIGHT_GUIDE_START() do { } while (false)
+#define LIGHT_GUIDE_STOP() do { } while (false)
+#define LIGHT_GUIDE_ERROR() do { } while (false)
+#endif /* defined(CONFIG_MCUBOOT_LIGHT_GUIDE_THREAD) */
 
 void os_heap_init(void);
 
@@ -427,6 +493,61 @@ void zephyr_boot_log_stop(void)
         * !defined(CONFIG_LOG_PROCESS_THREAD) && !defined(ZEPHYR_LOG_MODE_MINIMAL)
         */
 
+#if defined(CONFIG_MCUBOOT_LIGHT_GUIDE_THREAD)
+
+/* simple light guide thread */
+void light_guide_thread_func()
+{
+    guide_display_start();
+
+    int start_time_executions =
+            CONFIG_MCUBOOT_LIGHT_GUIDE_START_COND_TIME / LIGHT_GUIDE_THREAD_SLEEP_TIME;
+
+    for (int i = 0; i < start_time_executions; i++) {
+        if (stop_light_guide) {
+            break;
+        }
+        k_sleep(K_MSEC(LIGHT_GUIDE_THREAD_SLEEP_TIME));
+    }
+
+    int runled_executions =
+            CONFIG_MCUBOOT_LIGHT_GUIDE_RUNLED_TIME / LIGHT_GUIDE_THREAD_SLEEP_TIME;
+
+    while (!stop_light_guide) {
+        guide_move_color(&yellow);
+        for (int i = 0; i < runled_executions; i++) {
+            if (stop_light_guide) {
+                break;
+            }
+            k_sleep(K_MSEC(LIGHT_GUIDE_THREAD_SLEEP_TIME));
+        }
+    }
+
+    guide_display_start();
+
+    k_sem_give(&light_guide_sem);
+}
+
+void light_guide_start(void)
+{
+        /* start light guide thread */
+        k_thread_create(&light_guide_thread, light_guide_stack,
+                K_THREAD_STACK_SIZEOF(light_guide_stack),
+                light_guide_thread_func, NULL, NULL, NULL,
+                K_HIGHEST_APPLICATION_THREAD_PRIO, 0,
+                K_MSEC(LIGHT_GUIDE_THREAD_SLEEP_TIME));
+
+        k_thread_name_set(&light_guide_thread, "light_guide");
+}
+
+void light_guide_stop(void)
+{
+    stop_light_guide = true;
+    (void)k_sem_take(&light_guide_sem, K_FOREVER);
+}
+
+#endif /* defined(CONFIG_MCUBOOT_LIGHT_GUIDE_THREAD) */
+
 #if defined(CONFIG_MCUBOOT_SERIAL) || defined(CONFIG_BOOT_USB_DFU_GPIO)
 
 #ifdef CONFIG_MCUBOOT_SERIAL
@@ -561,14 +682,10 @@ void main(void)
     led_init();
 #endif
 
-#ifdef CONFIG_MCUBOOT_LIGHT_GUIDE
-    // initialize light guide
-    guide_init();
-#endif
-
     os_heap_init();
 
     ZEPHYR_BOOT_LOG_START();
+    LIGHT_GUIDE_START();
 
     (void)rc;
 
@@ -635,10 +752,6 @@ void main(void)
     uint32_t start = k_uptime_get_32();
 #endif
 
-#ifdef CONFIG_MCUBOOT_LIGHT_GUIDE
-    guide_display_start();
-#endif
-
     FIH_CALL(boot_go, fih_rc, &rsp);
 
 #ifdef CONFIG_BOOT_SERIAL_WAIT_FOR_DFU
@@ -655,6 +768,8 @@ void main(void)
 
         mcuboot_status_change(MCUBOOT_STATUS_NO_BOOTABLE_IMAGE_FOUND);
 
+        LIGHT_GUIDE_STOP();
+        LIGHT_GUIDE_ERROR();
         FIH_PANIC;
     }
 
@@ -670,11 +785,13 @@ void main(void)
     mcuboot_status_change(MCUBOOT_STATUS_BOOTABLE_IMAGE_FOUND);
 
     ZEPHYR_BOOT_LOG_STOP();
+    LIGHT_GUIDE_STOP();
     do_boot(&rsp);
 
     mcuboot_status_change(MCUBOOT_STATUS_BOOT_FAILED);
 
     BOOT_LOG_ERR("Never should get here");
+    LIGHT_GUIDE_ERROR();
     while (1)
         ;
 }
